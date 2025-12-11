@@ -65,6 +65,8 @@ classdef MatViewerTool < matlab.apps.AppBase
         % 数据存储
         MatFiles                cell
         MatData                 cell
+        FrameCacheSize         double
+        CacheOrder             double
         CurrentIndex            double
         AllFields               cell
         FieldCheckboxes         cell
@@ -125,6 +127,8 @@ classdef MatViewerTool < matlab.apps.AppBase
             % 初始化属性
             app.MatFiles = {};
             app.MatData = {};
+            app.FrameCacheSize = 5;  % 默认缓存5帧，避免频繁加载
+            app.CacheOrder = [];
             app.CurrentIndex = 1;
             app.AllFields = {};
             app.FieldCheckboxes = {};
@@ -1398,6 +1402,222 @@ classdef MatViewerTool < matlab.apps.AppBase
             img = reshape(rawData(1:usableCount), [side, side]);
         end
 
+        function data = loadImageData(app, fullPath)
+            % 懒加载图像文件，保持接口一致
+            data = struct();
+            if ~isfile(fullPath)
+                data = [];
+                return;
+            end
+
+            [~, ~, ext] = fileparts(fullPath);
+            if strcmpi(ext, '.bmp')
+                data.image_matrix = imread(fullPath);
+            elseif strcmpi(ext, '.raw')
+                data.image_matrix = readRawImage(app, fullPath);
+            else
+                data = [];
+                return;
+            end
+
+            if isempty(data) || ~isfield(data, 'image_matrix') || isempty(data.image_matrix)
+                data = [];
+                return;
+            end
+
+            data.source_type = 'image';
+        end
+
+        function [data, success] = loadMatFileData(app, fullPath)
+            % 统一的MAT文件加载流程，便于懒加载复用
+            data = struct();
+            success = false;
+
+            if ~isfile(fullPath)
+                return;
+            end
+
+            loadSuccess = false;
+
+            % 方法1: 尝试 load
+            try
+                data = load(fullPath);
+                loadSuccess = true;
+            catch
+                % load 失败，尝试 matfile
+            end
+
+            % 方法2: 使用 matfile 逐个读取（跳过损坏变量）
+            if ~loadSuccess
+                try
+                    m = matfile(fullPath);
+                    varList = who(m);
+
+                    for vIdx = 1:length(varList)
+                        varName = varList{vIdx};
+
+                        % 跳过元数据
+                        if startsWith(varName, '__')
+                            continue;
+                        end
+
+                        try
+                            % 尝试读取该变量
+                            data.(varName) = m.(varName);
+                        catch
+                            % 跳过损坏的变量，标记为读取失败
+                            data.(varName) = '(读取失败)';
+                        end
+                    end
+
+                catch
+                    % matfile 也失败，跳过该文件
+                    return;
+                end
+            end
+
+            % 查找矩阵字段
+            fieldNames = fieldnames(data);
+            matrixField = '';
+
+            % 优先级1: 查找 complex_matrix
+            if isfield(data, 'complex_matrix')
+                value = data.complex_matrix;
+                if isnumeric(value) && ~isstruct(value) && numel(value) > 1
+                    matrixField = 'complex_matrix';
+                end
+            end
+
+            % 优先级2: 查找常见变量名
+            if isempty(matrixField)
+                commonNames = {'signal', 'randomMatrix', 'randomVector', 'matrix', 'vector', 'data'};
+                for k = 1:length(commonNames)
+                    if isfield(data, commonNames{k})
+                        value = data.(commonNames{k});
+                        if isnumeric(value) && ~isstruct(value) && numel(value) > 1
+                            matrixField = commonNames{k};
+                            break;
+                        end
+                    end
+                end
+            end
+
+            % 优先级3: 遍历所有字段
+            if isempty(matrixField)
+                for j = 1:length(fieldNames)
+                    fieldName = fieldNames{j};
+
+                    % 跳过元数据
+                    if startsWith(fieldName, '__')
+                        continue;
+                    end
+
+                    value = data.(fieldName);
+
+                    if isnumeric(value) && ~isstruct(value) && numel(value) > 1
+                        matrixField = fieldName;
+                        break;
+                    end
+                end
+            end
+
+            if isempty(matrixField)
+                data = [];
+                return;
+            end
+
+            % 保存数据
+            complexMatrix = data.(matrixField);
+            if ~isreal(complexMatrix)
+                data.complex_matrix = complex(complexMatrix);
+            else
+                data.complex_matrix = double(complexMatrix);
+            end
+
+            data.original_matrix_field = matrixField;
+
+            if ~strcmp(matrixField, 'complex_matrix')
+                data = rmfield(data, matrixField);
+            end
+
+            % 统一帧信息字段名为 frame_info
+            % 规则：mat文件中只有两个变量，一个是矩阵/向量（绘图用），一个是struct（帧信息）
+            fieldNames = fieldnames(data);
+            structFields = {};
+
+            % 找出所有struct类型的字段（排除已处理的complex_matrix和特殊字段）
+            for k = 1:length(fieldNames)
+                fieldName = fieldNames{k};
+                if ~strcmp(fieldName, 'complex_matrix') && ...
+                   ~strcmp(fieldName, 'original_matrix_field') && ...
+                   ~startsWith(fieldName, '__') && ...
+                   isfield(data, fieldName) && ...
+                   isstruct(data.(fieldName))
+                    structFields{end+1} = fieldName;
+                end
+            end
+
+            % 如果有struct字段且不叫frame_info，统一重命名为frame_info
+            if ~isempty(structFields)
+                % 只处理第一个struct字段（按照规则应该只有一个帧信息）
+                originalName = structFields{1};
+                if ~strcmp(originalName, 'frame_info')
+                    data.frame_info = data.(originalName);
+                    data = rmfield(data, originalName);
+                end
+            end
+
+            success = true;
+        end
+
+        function data = getFrameData(app, idx)
+            % 懒加载并缓存指定索引的数据
+            data = [];
+            if idx < 1 || idx > length(app.MatFiles)
+                return;
+            end
+
+            % 确保MatData大小正确
+            if length(app.MatData) < length(app.MatFiles)
+                app.MatData(length(app.MatFiles)) = {[]};
+            end
+
+            if ~isempty(app.MatData{idx})
+                data = app.MatData{idx};
+                app.CacheOrder = [app.CacheOrder(app.CacheOrder ~= idx), idx];
+                return;
+            end
+
+            if app.IsImageDataset
+                data = loadImageData(app, app.MatFiles{idx});
+            else
+                [data, loadOk] = loadMatFileData(app, app.MatFiles{idx});
+                if ~loadOk
+                    data = [];
+                end
+            end
+
+            if isempty(data)
+                return;
+            end
+
+            cacheFrameData(app, idx, data);
+        end
+
+        function cacheFrameData(app, idx, data)
+            % 将加载的数据写入缓存，并根据容量淘汰最早使用的帧
+            app.MatData{idx} = data;
+
+            app.CacheOrder(app.CacheOrder == idx) = [];
+            app.CacheOrder(end+1) = idx;
+
+            while length(app.CacheOrder) > app.FrameCacheSize
+                evictIdx = app.CacheOrder(1);
+                app.MatData{evictIdx} = [];
+                app.CacheOrder(1) = [];
+            end
+        end
+
         % ==================== 数据导入函数 ====================
         
         function importFiles(app)
@@ -1446,6 +1666,7 @@ classdef MatViewerTool < matlab.apps.AppBase
             % 清空现有数据
             app.MatFiles = {};
             app.MatData = {};
+            app.CacheOrder = [];
             app.AllFields = {};
             app.CurrentIndex = 1;
 
@@ -1510,6 +1731,7 @@ classdef MatViewerTool < matlab.apps.AppBase
 
             % 加载文件
             successCount = 0;
+            firstCachedIndex = [];
 
             for i = 1:length(selectedFiles)
                 d.Value = i / length(selectedFiles);
@@ -1527,182 +1749,58 @@ classdef MatViewerTool < matlab.apps.AppBase
                     end
 
                     if app.IsImageDataset
-                        data = struct();
-                        [~, ~, ext] = fileparts(fullPath);
-                        if strcmpi(ext, '.bmp')
-                            data.image_matrix = imread(fullPath);
-                        elseif strcmpi(ext, '.raw')
-                            data.image_matrix = readRawImage(app, fullPath);
-                        end
-
-                        if ~isfield(data, 'image_matrix') || isempty(data.image_matrix)
+                        data = loadImageData(app, fullPath);
+                        if isempty(data)
                             continue;
                         end
 
-                        data.source_type = 'image';
-
                         app.MatFiles{end+1} = fullPath;
-                        app.MatData{end+1} = data;
+                        app.MatData{end+1} = [];
+
+                        if isempty(firstCachedIndex)
+                            cacheFrameData(app, numel(app.MatFiles), data);
+                            firstCachedIndex = numel(app.MatFiles);
+                        end
+
                         successCount = successCount + 1;
                         continue;
                     end
 
-                    % 容错加载方法
-                    loadSuccess = false;
-                    data = struct();
+                    [data, loadSuccess] = loadMatFileData(app, fullPath);
 
-                    % 方法1: 尝试 load
-                    try
-                        data = load(fullPath);
-                        loadSuccess = true;
-                    catch
-                        % load 失败，尝试 matfile
-                    end
-
-                    % 方法2: 使用 matfile 逐个读取（跳过损坏变量）
                     if ~loadSuccess
-                        try
-                            m = matfile(fullPath);
-                            varList = who(m);
-
-                            for vIdx = 1:length(varList)
-                                varName = varList{vIdx};
-
-                                % 跳过元数据
-                                if startsWith(varName, '__')
-                                    continue;
-                                end
-
-                                try
-                                    % 尝试读取该变量
-                                    data.(varName) = m.(varName);
-                                catch
-                                    % 跳过损坏的变量，标记为读取失败
-                                    data.(varName) = '(读取失败)';
-                                end
-                            end
-
-                        catch
-                            % matfile 也失败，跳过该文件
-                            continue;
-                        end
+                        continue;
                     end
-                    
-                    % 查找矩阵字段
+
+                    app.MatFiles{end+1} = fullPath;
+                    app.MatData{end+1} = [];
+
+                    % 收集字段（排除特殊字段和损坏字段）
                     fieldNames = fieldnames(data);
-                    matrixField = '';
-                    
-                    % 优先级1: 查找 complex_matrix
-                    if isfield(data, 'complex_matrix')
-                        value = data.complex_matrix;
-                        if isnumeric(value) && ~isstruct(value) && numel(value) > 1
-                            matrixField = 'complex_matrix';
-                        end
-                    end
-                    
-                    % 优先级2: 查找常见变量名
-                    if isempty(matrixField)
-                        commonNames = {'signal', 'randomMatrix', 'randomVector', 'matrix', 'vector', 'data'};
-                        for k = 1:length(commonNames)
-                            if isfield(data, commonNames{k})
-                                value = data.(commonNames{k});
-                                if isnumeric(value) && ~isstruct(value) && numel(value) > 1
-                                    matrixField = commonNames{k};
-                                    break;
-                                end
+                    for j = 1:length(fieldNames)
+                        fieldName = fieldNames{j};
+                        if ~strcmp(fieldName, 'complex_matrix') && ...
+                           ~strcmp(fieldName, 'original_matrix_field') && ...
+                           ~startsWith(fieldName, '__') && ...
+                           isfield(data, fieldName)
+                            % 检查是否是损坏标记
+                            if ~(ischar(data.(fieldName)) && strcmp(data.(fieldName), '(读取失败)'))
+                                app.AllFields{end+1} = fieldName;
                             end
                         end
                     end
-                    
-                    % 优先级3: 遍历所有字段
-                    if isempty(matrixField)
-                        for j = 1:length(fieldNames)
-                            fieldName = fieldNames{j};
-                            
-                            % 跳过元数据
-                            if startsWith(fieldName, '__')
-                                continue;
-                            end
-                            
-                            value = data.(fieldName);
-                            
-                            if isnumeric(value) && ~isstruct(value) && numel(value) > 1
-                                matrixField = fieldName;
-                                break;
-                            end
-                        end
-                    end
-                    
-                    if ~isempty(matrixField)
-                        % 保存数据
-                        complexMatrix = data.(matrixField);
-                        if ~isreal(complexMatrix)
-                            data.complex_matrix = complex(complexMatrix);
-                        else
-                            data.complex_matrix = double(complexMatrix);
-                        end
-                        
-                        data.original_matrix_field = matrixField;
-                        
-                        if ~strcmp(matrixField, 'complex_matrix')
-                            data = rmfield(data, matrixField);
-                        end
-                        
-                        % 统一帧信息字段名为 frame_info
-                        % 规则：mat文件中只有两个变量，一个是矩阵/向量（绘图用），一个是struct（帧信息）
-                        fieldNames = fieldnames(data);
-                        structFields = {};
-                        
-                        % 找出所有struct类型的字段（排除已处理的complex_matrix和特殊字段）
-                        for k = 1:length(fieldNames)
-                            fieldName = fieldNames{k};
-                            if ~strcmp(fieldName, 'complex_matrix') && ...
-                               ~strcmp(fieldName, 'original_matrix_field') && ...
-                               ~startsWith(fieldName, '__') && ...
-                               isfield(data, fieldName) && ...
-                               isstruct(data.(fieldName))
-                                structFields{end+1} = fieldName;
-                            end
-                        end
-                        
-                        % 如果有struct字段且不叫frame_info，统一重命名为frame_info
-                        if ~isempty(structFields)
-                            % 只处理第一个struct字段（按照规则应该只有一个帧信息）
-                            originalName = structFields{1};
-                            if ~strcmp(originalName, 'frame_info')
-                                data.frame_info = data.(originalName);
-                                data = rmfield(data, originalName);
-                                % 记录原始字段名
-                                % data.original_frame_info_field = originalName;
-                            end
-                        end
 
-                        app.MatFiles{end+1} = fullPath;
-                        app.MatData{end+1} = data;
-                        
-                        % 收集字段（排除特殊字段和损坏字段）
-                        for j = 1:length(fieldNames)
-                            fieldName = fieldNames{j};
-                            if ~strcmp(fieldName, 'complex_matrix') && ...
-                               ~strcmp(fieldName, 'original_matrix_field') && ...
-                               ~startsWith(fieldName, '__') && ...
-                               isfield(data, fieldName)
-                                % 检查是否是损坏标记
-                                if ~(ischar(data.(fieldName)) && strcmp(data.(fieldName), '(读取失败)'))
-                                    app.AllFields{end+1} = fieldName;
-                                end
-                            end
-                        end
-                        
-                        successCount = successCount + 1;
+                    if isempty(firstCachedIndex)
+                        cacheFrameData(app, numel(app.MatFiles), data);
+                        firstCachedIndex = numel(app.MatFiles);
                     end
-                    
+
+                    successCount = successCount + 1;
                 catch
                     % 静默跳过失败的文件
                     continue;
                 end
             end
-            
             close(d);
             
             % 去重字段
@@ -1851,7 +1949,10 @@ classdef MatViewerTool < matlab.apps.AppBase
             dataMode = '';
             
             if ~isempty(app.MatData) && app.CurrentIndex > 0 && app.CurrentIndex <= length(app.MatData)
-                currentData = app.MatData{app.CurrentIndex};
+                currentData = getFrameData(app, app.CurrentIndex);
+                if isempty(currentData)
+                    currentData = struct();
+                end
                 
                 % 获取当前文件名
                 [~, filename] = fileparts(app.MatFiles{app.CurrentIndex});
@@ -1954,8 +2055,11 @@ classdef MatViewerTool < matlab.apps.AppBase
             if isempty(app.MatData) || app.CurrentIndex > length(app.MatData)
                 return;
             end
-            
-            data = app.MatData{app.CurrentIndex};
+
+            data = getFrameData(app, app.CurrentIndex);
+            if isempty(data) || ~isfield(data, 'complex_matrix')
+                return;
+            end
 
             % 自动播放时优先使用原始输入（若有raw_matrix），确保仅展示原图
             if app.AutoPlayActive
@@ -2023,8 +2127,8 @@ classdef MatViewerTool < matlab.apps.AppBase
             cla(app.ImageAxes3);
             cla(app.ImageAxes4);
 
-            data = app.MatData{app.CurrentIndex};
-            if ~isfield(data, 'image_matrix')
+            data = getFrameData(app, app.CurrentIndex);
+            if isempty(data) || ~isfield(data, 'image_matrix')
                 return;
             end
 
@@ -2245,8 +2349,12 @@ classdef MatViewerTool < matlab.apps.AppBase
                 app.FieldTable.Data = {};
                 return;
             end
-            
-            data = app.MatData{app.CurrentIndex};
+
+            data = getFrameData(app, app.CurrentIndex);
+            if isempty(data)
+                app.FieldTable.Data = {};
+                return;
+            end
             fieldNames = fieldnames(data);
             
             % 构建表格数据
@@ -2343,9 +2451,12 @@ classdef MatViewerTool < matlab.apps.AppBase
             if ~strcmp(dataType, 'struct')
                 return;
             end
-            
+
             % 获取当前数据
-            currentData = app.MatData{app.CurrentIndex};
+            currentData = getFrameData(app, app.CurrentIndex);
+            if isempty(currentData)
+                return;
+            end
             
             % 获取struct值
             if isfield(currentData, 'frame_info') && isfield(currentData.frame_info, fieldName)
@@ -2627,7 +2738,11 @@ classdef MatViewerTool < matlab.apps.AppBase
             isSAR = startsWith(lower(filename), 'sar');
             
             % 获取当前矩阵
-            data = app.MatData{app.CurrentIndex};
+            data = getFrameData(app, app.CurrentIndex);
+            if isempty(data) || ~isfield(data, 'complex_matrix')
+                lockImageOnlyUI(app);
+                return;
+            end
             complexMatrix = data.complex_matrix;
             isVector = isvector(complexMatrix);
             
@@ -3134,8 +3249,11 @@ classdef MatViewerTool < matlab.apps.AppBase
                 if frameIdx < 1 || frameIdx > length(app.MatData)
                     continue;
                 end
-                
-                data = app.MatData{frameIdx};
+
+                data = getFrameData(app, frameIdx);
+                if isempty(data)
+                    continue;
+                end
                 exportData = struct();
                 
                 % 1. 复制 complex_matrix（绘图变量）
@@ -3184,8 +3302,11 @@ classdef MatViewerTool < matlab.apps.AppBase
             if isempty(app.MatData) || app.CurrentIndex > length(app.MatData)
                 return;
             end
-            
-            data = app.MatData{app.CurrentIndex};
+
+            data = getFrameData(app, app.CurrentIndex);
+            if isempty(data) || ~isfield(data, 'complex_matrix')
+                return;
+            end
             complexMatrix = data.complex_matrix;
             vectorData = complexMatrix(:);  % 转为列向量
             
@@ -3230,8 +3351,11 @@ classdef MatViewerTool < matlab.apps.AppBase
             if isempty(app.MatData) || app.CurrentIndex > length(app.MatData)
                 return;
             end
-            
-            data = app.MatData{app.CurrentIndex};
+
+            data = getFrameData(app, app.CurrentIndex);
+            if isempty(data) || ~isfield(data, 'complex_matrix')
+                return;
+            end
             complexMatrix = data.complex_matrix;
             amplitudeMatrix = abs(complexMatrix);
             
@@ -3281,8 +3405,11 @@ classdef MatViewerTool < matlab.apps.AppBase
             if isempty(app.MatData) || app.CurrentIndex > length(app.MatData)
                 return;
             end
-            
-            data = app.MatData{app.CurrentIndex};
+
+            data = getFrameData(app, app.CurrentIndex);
+            if isempty(data) || ~isfield(data, 'complex_matrix')
+                return;
+            end
             complexMatrix = data.complex_matrix;
             amplitudeMatrix = abs(complexMatrix);
             
@@ -3333,8 +3460,11 @@ classdef MatViewerTool < matlab.apps.AppBase
             if isempty(app.MatData) || app.CurrentIndex > length(app.MatData)
                 return;
             end
-            
-            data = app.MatData{app.CurrentIndex};
+
+            data = getFrameData(app, app.CurrentIndex);
+            if isempty(data) || ~isfield(data, 'complex_matrix')
+                return;
+            end
             complexMatrix = data.complex_matrix;
             amplitudeMatrix = abs(complexMatrix);
             
@@ -3367,8 +3497,11 @@ classdef MatViewerTool < matlab.apps.AppBase
             if isempty(app.MatData) || app.CurrentIndex > length(app.MatData)
                 return;
             end
-            
-            data = app.MatData{app.CurrentIndex};
+
+            data = getFrameData(app, app.CurrentIndex);
+            if isempty(data) || ~isfield(data, 'complex_matrix')
+                return;
+            end
             complexMatrix = data.complex_matrix;
             amplitudeMatrix = abs(complexMatrix);
             
@@ -3405,7 +3538,7 @@ classdef MatViewerTool < matlab.apps.AppBase
                 return;
             end
             
-            data = app.MatData{app.CurrentIndex};
+            data = getFrameData(app, app.CurrentIndex);
             complexMatrix = data.complex_matrix;
             amplitudeMatrix = abs(complexMatrix);
             
@@ -4263,7 +4396,10 @@ classdef MatViewerTool < matlab.apps.AppBase
                     hasFrameInfo = false;
                     frameInfoData = struct();
                     if ~isempty(app.MatData) && app.CurrentIndex <= length(app.MatData)
-                        currentData = app.MatData{app.CurrentIndex};
+                        currentData = getFrameData(app, app.CurrentIndex);
+                        if isempty(currentData)
+                            currentData = struct();
+                        end
                         if isfield(currentData, 'frame_info')
                             hasFrameInfo = true;
                             frameInfoData = currentData.frame_info;
@@ -4535,7 +4671,10 @@ classdef MatViewerTool < matlab.apps.AppBase
                         hasFrameInfo = false;
                         frameInfoData = struct();
                         if ~isempty(app.MatData) && app.CurrentIndex <= length(app.MatData)
-                            currentData = app.MatData{app.CurrentIndex};
+                            currentData = getFrameData(app, app.CurrentIndex);
+                            if isempty(currentData)
+                                currentData = struct();
+                            end
                             if isfield(currentData, 'frame_info')
                                 hasFrameInfo = true;
                                 frameInfoData = currentData.frame_info;
@@ -4827,7 +4966,10 @@ classdef MatViewerTool < matlab.apps.AppBase
 
                     % 检查是否为帧信息字段
                     if ~isempty(app.MatData) && app.CurrentIndex <= length(app.MatData)
-                        currentData = app.MatData{app.CurrentIndex};
+                        currentData = getFrameData(app, app.CurrentIndex);
+                        if isempty(currentData)
+                            currentData = struct();
+                        end
                         if isfield(currentData, 'frame_info') && isfield(currentData.frame_info, newParamName)
                             src.Data{row, 3} = '将使用帧信息中的参数值';
                             uialert(dlg, sprintf('检测到参数"%s"与帧信息字段匹配！\n应用到全部数据时将使用每帧的对应字段值。', newParamName), '提示', 'Icon', 'info');
@@ -5014,7 +5156,10 @@ classdef MatViewerTool < matlab.apps.AppBase
                     % 检查是否有frame_info
                     hasFrameInfo = false;
                     if ~isempty(app.MatData) && app.CurrentIndex <= length(app.MatData)
-                        currentData = app.MatData{app.CurrentIndex};
+                        currentData = getFrameData(app, app.CurrentIndex);
+                        if isempty(currentData)
+                            currentData = struct();
+                        end
                         if isfield(currentData, 'frame_info')
                             hasFrameInfo = true;
                         end
@@ -5460,9 +5605,12 @@ classdef MatViewerTool < matlab.apps.AppBase
                     % 更新进度
                     progressDlg.Value = frameIdx / totalFrames;
                     progressDlg.Message = sprintf('正在处理第 %d/%d 帧...', frameIdx, totalFrames);
-                    
+
                     % 获取当前帧数据
-                    currentData = app.MatData{frameIdx};
+                    currentData = getFrameData(app, frameIdx);
+                    if isempty(currentData)
+                        continue;
+                    end
 
                     % 根据处理对象获取输入矩阵
                     inputMatrix = [];
@@ -5767,7 +5915,10 @@ classdef MatViewerTool < matlab.apps.AppBase
             
             try
                 % 获取当前帧数据
-                currentData = app.MatData{app.CurrentIndex};
+                currentData = getFrameData(app, app.CurrentIndex);
+                if isempty(currentData)
+                    return;
+                end
 
                 % 根据处理对象获取输入矩阵
                 inputMatrix = [];
@@ -6490,7 +6641,7 @@ classdef MatViewerTool < matlab.apps.AppBase
 
             % 1. 收集原图
             if app.ShowOriginalCheck.Value
-                viewList{end+1} = struct('data', app.MatData{app.CurrentIndex}, 'title', '原图', 'sourceColumn', 0);
+                viewList{end+1} = struct('data', getFrameData(app, app.CurrentIndex), 'title', '原图', 'sourceColumn', 0);
             end
 
             % 2. 收集所有预处理结果（按顺序遍历所有列）
@@ -6530,7 +6681,7 @@ classdef MatViewerTool < matlab.apps.AppBase
 
             % 如果没有任何视图，至少显示原图
             if isempty(viewList)
-                viewList{end+1} = struct('data', app.MatData{app.CurrentIndex}, 'title', '原图', 'sourceColumn', 0);
+                viewList{end+1} = struct('data', getFrameData(app, app.CurrentIndex), 'title', '原图', 'sourceColumn', 0);
             end
 
             % 统计需要显示的视图数量
@@ -7398,7 +7549,7 @@ classdef MatViewerTool < matlab.apps.AppBase
                 hasFrameInfo = false;
                 frameInfoData = struct();
                 if ~isempty(app.MatData) && app.CurrentIndex <= length(app.MatData)
-                    currentData = app.MatData{app.CurrentIndex};
+                    currentData = getFrameData(app, app.CurrentIndex);
                     if isfield(currentData, 'frame_info')
                         hasFrameInfo = true;
                         frameInfoData = currentData.frame_info;
@@ -7473,7 +7624,7 @@ classdef MatViewerTool < matlab.apps.AppBase
                 drawnow;
 
                 % 获取当前帧数据
-                currentData = app.MatData{app.CurrentIndex};
+                currentData = getFrameData(app, app.CurrentIndex);
 
                 % 默认使用当前数据作为输入
                 inputMatrix = [];
