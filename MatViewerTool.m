@@ -4487,18 +4487,9 @@ classdef MatViewerTool < matlab.apps.AppBase
             function loadDefaultScript(prepType)
                 % 加载默认预处理脚本
                 % 获取当前脚本所在目录
-                scriptPath = fileparts(mfilename('fullpath'));
+                scriptFile = app.resolveDefaultScript(prepType);
 
-                % 根据类型选择默认脚本
-                if strcmp(prepType, 'CFAR检测')
-                    scriptFile = fullfile(scriptPath, 'default_cfar.m');
-                elseif strcmp(prepType, '非相参积累')
-                    scriptFile = fullfile(scriptPath, 'default_noncoherent_integration.m');
-                elseif strcmp(prepType, '非相参检测')
-                    scriptFile = fullfile(scriptPath, 'default_noncoherent_recognition.m');
-                elseif strcmp(prepType, '多维识别')
-                    scriptFile = fullfile(scriptPath, 'default_multidim_recognition.m');
-                else
+                if strcmp(scriptFile, 'default')
                     return;
                 end
 
@@ -5004,20 +4995,8 @@ classdef MatViewerTool < matlab.apps.AppBase
                         return;
                     end
                 else
-                    % 使用默认脚本
-                    scriptDir = fileparts(mfilename('fullpath'));
-
-                    if strcmp(prepType, 'CFAR检测')
-                        scriptPath = fullfile(scriptDir, 'default_cfar.m');
-                    elseif strcmp(prepType, '非相参积累')
-                        scriptPath = fullfile(scriptDir, 'default_noncoherent_integration.m');
-                    elseif strcmp(prepType, '非相参检测')
-                        scriptPath = fullfile(scriptDir, 'default_noncoherent_recognition.m');
-                    elseif strcmp(prepType, '多维识别')
-                        scriptPath = fullfile(scriptDir, 'default_multidim_recognition.m');
-                    else
-                        scriptPath = 'default';
-                    end
+                    % 使用默认脚本（支持 .p/.m）
+                    scriptPath = app.resolveDefaultScript(prepType);
 
                     % 检查默认脚本是否存在
                     if ~strcmp(scriptPath, 'default') && ~isfile(scriptPath)
@@ -7347,33 +7326,28 @@ classdef MatViewerTool < matlab.apps.AppBase
                 end
             end
 
-            % 获取当前脚本所在目录
-            scriptPath = fileparts(mfilename('fullpath'));
-
             % 根据索引选择默认脚本
             if defaultPrepIndex == 1
                 % 非相参积累
-                scriptFile = fullfile(scriptPath, 'default_noncoherent_integration.m');
                 prepName = '非相参积累';
                 prepType = '非相参积累';
             elseif defaultPrepIndex == 2
                 % 非相参检测
-                scriptFile = fullfile(scriptPath, 'default_noncoherent_recognition.m');
                 prepName = '非相参检测';
                 prepType = '非相参检测';
             elseif defaultPrepIndex == 3
                 % CFAR检测
-                scriptFile = fullfile(scriptPath, 'default_cfar.m');
                 prepName = 'CFAR检测';
                 prepType = 'CFAR检测';
             elseif defaultPrepIndex == 4
                 % 多维识别
-                scriptFile = fullfile(scriptPath, 'default_multidim_recognition.m');
                 prepName = '多维识别';
                 prepType = '多维识别';
             else
                 return;
             end
+
+            scriptFile = app.resolveDefaultScript(prepType);
 
             % 检查脚本文件是否存在
             if ~exist(scriptFile, 'file')
@@ -7937,6 +7911,40 @@ classdef MatViewerTool < matlab.apps.AppBase
             end
         end
 
+    end
+
+    methods (Access = private)
+        function scriptFile = resolveDefaultScript(app, prepType)
+            % 根据预处理类型获取默认脚本路径，优先使用 .p 文件
+            switch prepType
+                case 'CFAR检测'
+                    baseName = 'default_cfar';
+                case '非相参积累'
+                    baseName = 'default_noncoherent_integration';
+                case '非相参检测'
+                    baseName = 'default_noncoherent_recognition';
+                case '多维识别'
+                    baseName = 'default_multidim_recognition';
+                otherwise
+                    scriptFile = 'default';
+                    return;
+            end
+
+            scriptDir = fileparts(mfilename('fullpath'));
+            scriptFile = app.preferPFile(scriptDir, baseName);
+        end
+
+        function scriptFile = preferPFile(~, scriptDir, scriptBaseName)
+            % 在同名脚本中优先返回 .p 文件
+            pFile = fullfile(scriptDir, [scriptBaseName, '.p']);
+            mFile = fullfile(scriptDir, [scriptBaseName, '.m']);
+
+            if isfile(pFile)
+                scriptFile = pFile;
+            else
+                scriptFile = mFile;
+            end
+        end
     end
 
     methods (Static)
