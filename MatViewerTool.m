@@ -5368,27 +5368,40 @@ classdef MatViewerTool < matlab.apps.AppBase
                 end
             end
 
-            function success = executePreprocessingWithFrameRange(app, prepConfig, frameIndices)
-                % 在指定帧范围内执行预处理
-                success = true;
+        function success = executePreprocessingWithFrameRange(app, prepConfig, frameIndices)
+            % 在指定帧范围内执行预处理
+            success = true;
 
-                try
-                    % 判断是应用到所有帧还是特定帧范围
-                    if length(frameIndices) == length(app.MatData)
-                        % 应用到所有帧
-                        success = executePreprocessingOnAllData(app, prepConfig);
-                    elseif length(frameIndices) == 1
-                        % 应用到单帧
-                        success = executePreprocessingOnCurrentData(app, prepConfig);
-                    else
-                        % 应用到指定帧范围（未来可以扩展）
-                        % 暂时使用当前帧的逻辑
-                        success = executePreprocessingOnCurrentData(app, prepConfig);
+            try
+                % 判断是应用到所有帧还是特定帧范围
+                if length(frameIndices) == length(app.MatData)
+                    % 应用到所有帧
+                    success = executePreprocessingOnAllData(app, prepConfig);
+                else
+                    % 逐帧执行，确保使用选定的帧索引
+                    for i = 1:length(frameIndices)
+                        targetIndex = frameIndices(i);
+                        success = executePreprocessingOnCurrentData(app, prepConfig, targetIndex);
+                        if ~success
+                            break;
+                        end
                     end
-                catch ME
-                    uialert(app.UIFigure, sprintf('预处理执行失败：\n%s', ME.message), '错误', 'Icon', 'error');
-                    success = false;
+
+                    % 处理完成后跳转到所选帧中最靠前的帧显示结果
+                    if success && ~isempty(frameIndices)
+                        firstIndex = frameIndices(1);
+                        app.CurrentIndex = firstIndex;
+                        app.FrameSlider.Value = firstIndex;
+                        displayCurrentImage(app);
+                        updateFrameInfoDisplay(app);
+                        updateDisplayButtonsState(app);
+                        updateImageInfoDisplay(app);
+                    end
                 end
+            catch ME
+                uialert(app.UIFigure, sprintf('预处理执行失败：\n%s', ME.message), '错误', 'Icon', 'error');
+                success = false;
+            end
             end
 
             function resultMatrix = getPreprocessingResult(app, frameIdx, prepName)
@@ -5916,18 +5929,22 @@ classdef MatViewerTool < matlab.apps.AppBase
         end
         
         
-        function success = executePreprocessingOnCurrentData(app, prepConfig)
-            % 在当前数据上执行预处理
-            
+        function success = executePreprocessingOnCurrentData(app, prepConfig, frameIdx)
+            % 在指定数据帧上执行预处理
+
             success = false;
-            
-            if isempty(app.MatData) || app.CurrentIndex > length(app.MatData)
+
+            if nargin < 3 || isempty(frameIdx)
+                frameIdx = app.CurrentIndex;
+            end
+
+            if isempty(app.MatData) || frameIdx > length(app.MatData)
                 return;
             end
-            
+
             try
                 % 获取当前帧数据
-                currentData = getFrameData(app, app.CurrentIndex);
+                currentData = getFrameData(app, frameIdx);
                 if isempty(currentData)
                     return;
                 end
@@ -5961,7 +5978,7 @@ classdef MatViewerTool < matlab.apps.AppBase
                     end
                 else
                     % 从预处理结果获取complex_matrix
-                    if isempty(app.PreprocessingResults) || app.CurrentIndex > size(app.PreprocessingResults, 1)
+                    if isempty(app.PreprocessingResults) || frameIdx > size(app.PreprocessingResults, 1)
                         uialert(app.UIFigure, sprintf('当前帧未找到预处理结果"%s"，请确认上一步是否进行处理！', processingObject), '错误', 'Icon', 'error');
                         return;
                     end
@@ -5970,18 +5987,18 @@ classdef MatViewerTool < matlab.apps.AppBase
                     % 缓存映射：1=保留, 2=CFAR检测, 3=非相参积累, 4=非相参检测, 5=多维识别, 6-7=自定义
                     prepData = [];
                     if strcmp(processingObject, 'CFAR检测')
-                        prepData = app.PreprocessingResults{app.CurrentIndex, 2};
+                        prepData = app.PreprocessingResults{frameIdx, 2};
                     elseif strcmp(processingObject, '非相参积累')
-                        prepData = app.PreprocessingResults{app.CurrentIndex, 3};
+                        prepData = app.PreprocessingResults{frameIdx, 3};
                     elseif strcmp(processingObject, '非相参检测')
-                        prepData = app.PreprocessingResults{app.CurrentIndex, 4};
+                        prepData = app.PreprocessingResults{frameIdx, 4};
                     elseif strcmp(processingObject, '多维识别')
-                        prepData = app.PreprocessingResults{app.CurrentIndex, 5};
+                        prepData = app.PreprocessingResults{frameIdx, 5};
                     else
                         % 在自定义预处理列（第4列及之后）中查找
                         for col = 4:size(app.PreprocessingResults, 2)
-                            if ~isempty(app.PreprocessingResults{app.CurrentIndex, col})
-                                result = app.PreprocessingResults{app.CurrentIndex, col};
+                            if ~isempty(app.PreprocessingResults{frameIdx, col})
+                                result = app.PreprocessingResults{frameIdx, col};
                                 if isfield(result, 'preprocessing_info') && ...
                                    isfield(result.preprocessing_info, 'name') && ...
                                    strcmp(result.preprocessing_info.name, processingObject)
@@ -6022,7 +6039,7 @@ classdef MatViewerTool < matlab.apps.AppBase
                 end
                 
                 % 创建输出目录
-                [dataPath, ~, ~] = fileparts(app.MatFiles{app.CurrentIndex});
+                [dataPath, ~, ~] = fileparts(app.MatFiles{frameIdx});
                 baseOutputDir = fullfile(dataPath, '预处理结果');
                 if ~exist(baseOutputDir, 'dir')
                     mkdir(baseOutputDir);
@@ -6031,7 +6048,7 @@ classdef MatViewerTool < matlab.apps.AppBase
                 if ~exist(outputDir, 'dir')
                     mkdir(outputDir);
                 end
-                [~, originalName, ~] = fileparts(app.MatFiles{app.CurrentIndex});
+                [~, originalName, ~] = fileparts(app.MatFiles{frameIdx});
 
                 % 执行预处理
                 additionalOutputs = struct();  % 初始化额外输出变量
@@ -6188,7 +6205,7 @@ classdef MatViewerTool < matlab.apps.AppBase
                     cacheColumn = 5;
                 end
 
-                app.PreprocessingResults{app.CurrentIndex, cacheColumn} = processedData;
+                app.PreprocessingResults{frameIdx, cacheColumn} = processedData;
 
                 success = true;
 
