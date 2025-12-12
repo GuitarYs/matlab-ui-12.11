@@ -3797,7 +3797,8 @@ classdef MatViewerTool < matlab.apps.AppBase
             contentPanel.BorderType = 'none';
             
             contentLayout = uigridlayout(contentPanel, [5, 1]);
-            contentLayout.RowHeight = {65, 55, 0, 105, '1x'};  % 处理对象行高
+%             contentLayout.RowHeight = {65, 55, 55, 105, '1x'};  % 处理对象行高 % 支持自定义版本
+            contentLayout.RowHeight = {65, 55, 0, 105, '1x'};  % 处理对象行高 % 不支持自定义版本
             contentLayout.Padding = [5 5 5 5];
             contentLayout.RowSpacing = 8;
             
@@ -3842,7 +3843,9 @@ classdef MatViewerTool < matlab.apps.AppBase
             typeLayout.Padding = [10 5 10 5];
 
             prepTypeDropdown = uidropdown(typeLayout);
-            % 所有可用的预处理类型（新规则：仅支持预置流程）
+%             % 所有可用的预处理类型（新规则：只有4种+自定义） % 支持自定义版本
+%             allPrepTypes = {'-- 请选择 --', '非相参积累', '非相参检测', 'CFAR检测', '多维识别', '自定义...'};
+            % 所有可用的预处理类型（新规则：仅支持预置流程） % 不支持自定义版本
             allPrepTypes = {'-- 请选择 --', '非相参积累', '非相参检测', 'CFAR检测', '多维识别'};
             prepTypeDropdown.Items = allPrepTypes;
             prepTypeDropdown.Value = '-- 请选择 --';
@@ -4167,17 +4170,25 @@ classdef MatViewerTool < matlab.apps.AppBase
                     % 未选择处理对象时，显示提示
                     availableTypes = {'-- 请选择 --'};
                 elseif strcmp(selectedObj, '当前帧原图')
-                    % 处理对象是"当前帧原图"时，只能选两条链的第一步：非相参积累、CFAR检测
-                    availableTypes = {'-- 请选择 --', '非相参积累', 'CFAR检测'};
+%                     % 处理对象是"当前帧原图"时，只能选两条链的第一步：非相参积累、CFAR检测、自定义 % 支持自定义版本
+%                     availableTypes = {'-- 请选择 --', '非相参积累', 'CFAR检测', '自定义...'};
+                    % 处理对象是"当前帧原图"时，只能选两条链的第一步：非相参积累、CFAR检测 % 不支持自定义版本
+                    availableTypes = {'-- 请选择 --', '非相参积累', 'CFAR检测'}; % 不支持自定义版本
                 elseif strcmp(selectedObj, '非相参积累')
-                    % 处理对象是"非相参积累"时，只能选非相参检测
-                    availableTypes = {'-- 请选择 --', '非相参检测'};
+%                     % 处理对象是"非相参积累"时，只能选非相参检测或自定义 % 支持自定义版本
+%                     availableTypes = {'-- 请选择 --', '非相参检测', '自定义...'};
+                    % 处理对象是"非相参积累"时，只能选非相参检测 % 不支持自定义版本
+                    availableTypes = {'-- 请选择 --', '非相参检测'}; % 不支持自定义版本
                 elseif strcmp(selectedObj, 'CFAR检测')
-                    % 处理对象是"CFAR检测"时，只能选多维识别
-                    availableTypes = {'-- 请选择 --', '多维识别'};
+%                     % 处理对象是"CFAR检测"时，只能选多维识别或自定义 % 支持自定义版本
+%                     availableTypes = {'-- 请选择 --', '多维识别', '自定义...'};
+                    % 处理对象是"CFAR检测"时，只能选多维识别 % 不支持自定义版本
+                    availableTypes = {'-- 请选择 --', '多维识别'}; % 不支持自定义版本
                 else
-                    % 其他已处理的预处理结果不再开放自定义处理
-                    availableTypes = {'-- 请选择 --'};
+%                     % 其他已处理的预处理结果，只能选自定义 % 支持自定义版本
+%                     availableTypes = {'-- 请选择 --', '自定义...'};
+                    % 其他已处理的预处理结果不再开放自定义处理 % 不支持自定义版本
+                    availableTypes = {'-- 请选择 --'}; % 不支持自定义版本
                 end
 
                 % 更新下拉框选项
@@ -4332,14 +4343,19 @@ classdef MatViewerTool < matlab.apps.AppBase
             function onTypeChanged(~, ~)
                 prepType = prepTypeDropdown.Value;
 
+%                 if strcmp(prepType, '自定义...')
+%                     customNamePanel.Visible = 'on';
+%                     contentLayout.RowHeight = {65, 55, 55, 105, '1x'};
+%                 else
                 customNamePanel.Visible = 'off';
-                contentLayout.RowHeight = {65, 55, 0, 105, '1x'};
+                contentLayout.RowHeight = {65, 55, 0, 105, '1x'}; % 不支持自定义版本
 
                 % 如果选择四个默认预处理类型，且默认选择"使用默认脚本"，自动加载
                 if (strcmp(prepType, 'CFAR检测') || strcmp(prepType, '非相参积累') || ...
                     strcmp(prepType, '非相参检测') || strcmp(prepType, '多维识别')) && defaultScriptRadio.Value
                     loadDefaultScript(prepType);
                 end
+%                 end % 支持自定义版本
             end
             
             function onSourceChanged(~, event)
@@ -4643,7 +4659,14 @@ classdef MatViewerTool < matlab.apps.AppBase
                     return;
                 end
                 
-                if strcmp(prepType, 'CFAR检测') || strcmp(prepType, '非相参积累') || ...
+%                 if strcmp(prepType, '自定义...')
+%                     if customScriptRadio.Value && ~isempty(scriptPathField.Value)
+%                         tryAutoDetectFromScript(scriptPathField.Value);
+%                     else
+%                         uialert(dlg, '请先选择自定义脚本文件！', '提示');
+%                     end
+%                 elseif strcmp(prepType, 'CFAR检测') || strcmp(prepType, '非相参积累') || ... % 支持自定义版本
+                if strcmp(prepType, 'CFAR检测') || strcmp(prepType, '非相参积累') || ... % 不支持自定义版本
                        strcmp(prepType, '非相参检测') || strcmp(prepType, '多维识别')
                     % 对于四个默认预处理类型，如果选择"使用默认脚本"，则从默认脚本文件加载
                     if defaultScriptRadio.Value
@@ -5105,7 +5128,14 @@ classdef MatViewerTool < matlab.apps.AppBase
                 end
                 
                 % 确定名称
-                prepName = prepType;
+%                 if strcmp(prepType, '自定义...')
+%                     prepName = strtrim(customNameField.Value);
+%                     if isempty(prepName)
+%                         uialert(dlg, '请输入自定义名称！', '提示');
+%                         return;
+%                     end
+%                 else % 支持自定义版本
+                prepName = prepType; % 不支持自定义版本
                 
                 % 确定脚本路径
                 if customScriptRadio.Value
