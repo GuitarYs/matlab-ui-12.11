@@ -9,7 +9,8 @@ function output_data = default_cfar(input_data, params)
 % PARAM: training_cells, int, 16
 % PARAM: method, string, CA
 % PARAM: apply_log, bool, true
-% PARAM: D, double, 0   
+% PARAM: D, double, 0
+% PARAM: advanced_settings, struct, struct('e', 16.82, 'u', 42, 'c', [24 27 44 30 11], 'i', [32 47 18])
 
     % 获取参数
     threshold_factor = getParam(params, 'threshold_factor', 3.0);
